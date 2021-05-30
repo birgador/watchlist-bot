@@ -31,7 +31,7 @@ bucket = storage_client.get_bucket('watchlist-bot')
 
 
 
-token = 'telegram-token'
+token = '1716550987:AAEF7ZhZrwtOtlO8i4HPLULCarCcjCxVhsk'
 
 app = Flask(__name__)
 # excep = ''
@@ -117,6 +117,18 @@ def show(update,context):
         context.bot.send_message(chat_id = update.effective_chat.id,text='Wrong name. This token is not in watchlist')
 
 
+
+def suggest(update,context):
+    suggestions = json.loads(bucket.get_blob('suggest.json').download_as_string())
+    suggestion = update.message.text.split('/suggest')[1].lstrip()
+    suggestions[len(suggestions)+1] = suggestion
+    bucket.get_blob('suggest.json').upload_from_string(json.dumps(suggestions))
+    context.bot.send_message(chat_id = update.effective_chat.id,text='Added suggestion! You will be able to list them on my next update!"')
+
+def shelp(update,context):
+    message = '/add+tokenSymbol+tokenDescription: Adds token and its description to the watchlist if the tokenSymbol is listed in coingecko.\n /show+tokenName: Shows coin name, tokenDescription, current usd price, market cap, market cap rank, ath and change since ath.\n /suggest: lets you suggest features for this bot. Might not be implemented\n /tokens shows current token in the watchlist.'
+
+    context.bot.send_message(chat_id=update.effective_chat.id,text=message)
 #Telegram api and wrapper logic
 bot = Bot(token=token)
 dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0)
@@ -134,7 +146,11 @@ dispatcher.add_handler(show_token_handler)
 tokens_handler = CommandHandler('tokens',tokens)
 dispatcher.add_handler(tokens_handler)
 
+suggest_handler = CommandHandler('suggest',suggest)
+dispatcher.add_handler(suggest_handler)
 
+help_handler = CommandHandler('help',shelp)
+dispatcher.add_handler(help_handler)
 
 @app.route("/", methods=["POST"])
 def index() -> Response:
