@@ -1,156 +1,184 @@
-import os
+# import os
 import http
-import json
-import traceback
+# import json
+# import traceback
 
 from flask import Flask, request
 from werkzeug.wrappers import Response
 
 
-import binance.client
+# import binance.client
 from pycoingecko import CoinGeckoAPI
 
-from telegram import Update,Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext, Dispatcher
+from telegram import Update,Bot, InlineKeyboardButton,InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, Dispatcher, PicklePersistence, CallbackQueryHandler
+from GoogleCloudStoragePersistence import GoogleCloudStoragePersistence
 
-from google.cloud import storage
+# watchlist = json.loads(bucket.get_blob('watchlist.json').download_as_string())
+''' HELPING FUNCTIONS GO HERE '''
+def merge_into_dict(test_list):
+
+    res = {key: list({sub[key] for sub in test_list if key in sub})
+      for key in {key for sub in test_list for key in sub}}
+
+    return res
+def print_cg_data(update,context,coin):
+    api_call = cg.get_coin_by_id(coin)
+    market_cap_rank = str(api_call['market_data']['market_cap_rank'])
+    market_cap = str(api_call['market_data']['market_cap']['usd'])
+    price = str(api_call['market_data']['current_price']['usd'])
+    if api_call['market_data']['price_change_percentage_24h'] != None:
+        price_24 = str(round(api_call['market_data']['price_change_percentage_24h'],2))
+    else:
+        price_24 = 'None'
+    ath = str(api_call['market_data']['ath']['usd'])
+    ath_date = str(api_call['market_data']['ath_date']['usd'])
+    ath_change_percentage = str(round(api_call['market_data']['ath_change_percentage']['usd'],2))
+    watchlist = context.chat_data['watchlist']
+    context.bot.send_message(
+        chat_id = update.effective_chat.id,
+        text=coin+': \n'+
+        ' Desc: '+watchlist[coin]+'\n'
+        ' Price: '+price+' usd ('+price_24+'% 24h) \n'+
+        ' Market cap: '+market_cap+' ('+market_cap_rank+')'+'\n'+
+        ' ATH: '+ath+' ('+ath_change_percentage+' % since ath)'
+        )
+
+
+''' TELEGRAM BOT CONF AND SETUP GOES HERE '''
 
 cg = CoinGeckoAPI()
-coins = cg.get_coins_list()
 
-coin_list= {ids['id']:ids['symbol'] for ids in coins}
+coins = cg.get_coins_list(include_platform=True)
 
-coin_ids = [coin['id'] for coin in coins]
-coin_symbols = [coin['symbol'] for coin in coins]
+symbols_list = [{coin['symbol']:coin['id']} for coin in coins]
+symbols_to_ids = merge_into_dict(symbols_list)
 
-ids_to_symbols = dict(zip(coin_ids,coin_symbols))
-symbols_to_ids = dict(zip(coin_symbols,coin_ids))
+ids = {coin['id']:{'name':coin['name'],'symbol':coin['symbol'],'platforms':coin['platforms']} for coin in coins}
 
-storage_client = storage.Client()
-bucket = storage_client.get_bucket('watchlist-bot')
+token = 'TOKEN'
 
+watchlist_persistence = GoogleCloudStoragePersistence(filename='watchlist.json',bucketname='crypto-watchlist')
 
-
-token = '1716550987:AAEF7ZhZrwtOtlO8i4HPLULCarCcjCxVhsk'
 
 app = Flask(__name__)
-# excep = ''
 
-#Add token
-def addToken(update,context):
 
-    try:
-        watchlist = json.loads(bucket.get_blob('watchlist.json').download_as_string())
-        message = update.message.text.split('/add')[1].lstrip()
-        parsed_coin = message.split(' ')[0]
-        desc=''
-        # Check if coin in watchlist and then if in coingecko
-        if parsed_coin not in watchlist and symbols_to_ids[parsed_coin] not in watchlist:
-            for word in message.split(' ')[1:]:
-                    desc += word+' '
-            if parsed_coin in coin_ids or parsed_coin.lower() in coin_ids:
-                coin = parsed_coin    
-            elif parsed_coin in coin_symbols or parsed_coin.lower() in coin_symbols:
-                coin = symbols_to_ids[parsed_coin]
+''' BOT COMMANDS AND LOGIC GO HERE '''
+
+def start(update: Update, context: CallbackContext) -> None:
+    """Send a message when the command /start is issued."""
+    # context.chat_data.clear()
+    if 'watchlist' not in context.chat_data:
+        context.chat_data['watchlist'] = {}
+    update.message.reply_text("Let's go get some tendies ($_$)")
+    update.message.reply_animation("https://media1.tenor.com/images/bf327be1ebbde7f32baf5136042bf118/tenor.gif?itemid=14563637")
+
+def clear(update: Update, context: CallbackContext) -> None:
+    """Send a message when the command /start is issued."""
+    context.chat_data.clear()
+    context.chat_data['watchlist'] = {}
+    update.message.reply_text("Clearrr")
+   
+def addToken(update, context):
+    """Usage: /get uuid"""
+    # Seperate ID from command
+    desc = ''
+    for arg in context.args[1:]:
+        desc+=arg+" "
+    coin = context.args[0]
+
+    if coin not in  context.chat_data['watchlist']:     #Check if coin id already in watchlist. This applies for coins where id = symbol
+        
+        if coin in symbols_to_ids:      #They should use symbols to add coins and get prompted duplicates to use id
+            if len(symbols_to_ids[coin]) > 1:   # If there are more than 1 candidates for same symbol
+                update.message.reply_text('I have found these coin-ids for symbol: {coin}. Please try choose one and try again'.format(coin = coin))
+                candidates = symbols_to_ids[coin].copy()
+                for candidate in candidates:
+                    if candidate in context.chat_data['watchlist']:
+                        candidates.pop(candidates.index(candidate))
+
+                keyboard = [
+                    [InlineKeyboardButton(i, callback_data=i+"desc:"+desc) for i in candidates]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                update.message.reply_text('Please choose:', reply_markup=reply_markup)
             else:
-                coin=''
-                context.bot.send_message(chat_id = update.effective_chat.id,text='Cannot add '+parsed_coin+' to watchlist. It is not listed on Coingecko!')
-            #Add coin to watchlist
-            if coin != '':
-                watchlist[coin] = desc
-                bucket.get_blob('watchlist.json').upload_from_string(json.dumps(watchlist))
-                context.bot.send_message(chat_id = update.effective_chat.id,text='Added '+coin+' to watchlist!')
+                id = symbols_to_ids[coin][0]
+                context.chat_data['watchlist'][id] = desc
+                update.message.reply_text('Added {coin} to watchlist!'.format(coin = id))
+        elif coin in ids:
+            context.chat_data['watchlist'][coin] = desc
+            update.message.reply_text('Added {coin} to watchlist!'.format(coin = coin))
         else:
-            context.bot.send_message(chat_id = update.effective_chat.id,text='Not to FOMO or anything, but coin already in watchlist ( ͡° ͜ʖ ͡°)')
-    except:
-        # excep = traceback.format_exc()
-        context.bot.send_message(chat_id = update.effective_chat.id,text='Something went wrong. Please use /exc to see the error')
-        context.bot.send_message(chat_id = update.effective_chat.id,text='The syntax is /add token Description')
+            update.message.reply_text('Cannot add {coin}. It is not listed on Coingecko!'.format(coin = coin))
 
 #List tokens
 def tokens(update,context):
-    watchlist = json.loads(bucket.get_blob('watchlist.json').download_as_string())
-    message = ''
+    watchlist = context.chat_data['watchlist']
     
-    for coin in watchlist:
-        symb = ids_to_symbols[coin]
-        message += symb.upper()+'\n'
-    bot.send_message(chat_id = update.effective_chat.id,text = message)
+    if watchlist != {}:
+        message = ''
+        for id in watchlist:
+            symb = ids[id]['symbol']
+            name = ids[id]['name']
+            message += id+' ('+symb.upper()+', '+name+')\n'
+    else:
+        message = 'No coins in wathclist yet'
+    context.bot.send_message(chat_id = update.effective_chat.id,text = message)
 
-# def exc(update,context):
-#     if excep != '':
-#         context.bot.send_message(chat_id = update.effective_chat.id,text=excep)
-#     else:
-#         context.bot.send_message(chat_id = update.effective_chat.id,text='No errors!')
 
-#Show token info
 def show(update,context):
-    watchlist = json.loads(bucket.get_blob('watchlist.json').download_as_string())
-    message = update.message.text
-    try:
-        parsed_coin = message.split(' ')[1]
-        if parsed_coin in symbols_to_ids or parsed_coin.lower() in symbols_to_ids:
-            coin = symbols_to_ids[parsed_coin]
-        elif parsed_coin in ids_to_symbols or parsed_coin.lower() in ids_to_symbols:
-            coin = parsed_coin
-        # str(cg.get_price(ids=coin,vs_currencies='usd')[coin]['usd'])
-        api_call = cg.get_coin_by_id(coin)
-        market_cap_rank = str(api_call['market_data']['market_cap_rank'])
-        market_cap = str(api_call['market_data']['market_cap']['usd'])
-        price = str(api_call['market_data']['current_price']['usd'])
-        price_24 = str(round(api_call['market_data']['price_change_percentage_24h'],2))
-        ath = str(api_call['market_data']['ath']['usd'])
-        ath_date = str(api_call['market_data']['ath_date']['usd'])
-        ath_change_percentage = str(round(api_call['market_data']['ath_change_percentage']['usd'],2))
+    
+    # message = update.message.text
 
-        context.bot.send_message(
-            chat_id = update.effective_chat.id,
-            text=coin+': \n'+
-            ' Desc: '+watchlist[coin]+'\n'
-            ' Price: '+price+' usd ('+price_24+'% 24h) \n'+
-            ' Market cap: '+market_cap+' ('+market_cap_rank+')'+'\n'+
-            ' ATH: '+ath+' ('+ath_change_percentage+' % since ath)'
-            )
-    except:
-        # print(traceback.format_exc())
-        # context.bot.send_message(chat_id = update.effective_chat.id,text=traceback.format_exc())
+    coin = context.args[0]
+    if coin in context.chat_data['watchlist']:      #They have written /show coinId
+        print_cg_data(update,context,coin)
+    elif coin in symbols_to_ids and(True in [id in context.chat_data['watchlist'] for id in symbols_to_ids[coin]]):             #They have written /show coinSymbol
+        # [id for id in symbols_to_ids[coin] if id in context.chat_data['watchlist']]
+        # print([id for id in symbols_to_ids[coin] if id in context.chat_data['watchlist']])
+        keyboard = [
+                    [InlineKeyboardButton(id, callback_data='show:'+id) for id in symbols_to_ids[coin] if id in context.chat_data['watchlist']]
+                ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text('Found one or more coins in watchlist with symbol: {coin}. Please choose one coin id.'.format(coin=coin), reply_markup=reply_markup)
+    else:
         context.bot.send_message(chat_id = update.effective_chat.id,text='Wrong name. This token is not in watchlist')
 
+''' InlineKeyboardButton logic goes here '''
 
 
-def suggest(update,context):
-    suggestions = json.loads(bucket.get_blob('suggest.json').download_as_string())
-    suggestion = update.message.text.split('/suggest')[1].lstrip()
-    suggestions[len(suggestions)+1] = suggestion
-    bucket.get_blob('suggest.json').upload_from_string(json.dumps(suggestions))
-    context.bot.send_message(chat_id = update.effective_chat.id,text='Added suggestion! You will be able to list them on my next update!"')
+def buttonAdd(update: Update, context: CallbackContext) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    query = update.callback_query
+    query.answer()
+    partition = query.data.partition("desc:")
+    coin = partition[0]
+    desc = partition[2]
+    context.chat_data['watchlist'][coin] = desc
+    query.edit_message_text(text=f"Added: {coin} to watchlist!")
 
-def shelp(update,context):
-    message = '/add+tokenSymbol+tokenDescription: Adds token and its description to the watchlist if the tokenSymbol is listed in coingecko.\n /show+tokenName: Shows coin name, tokenDescription, current usd price, market cap, market cap rank, ath and change since ath.\n /suggest: lets you suggest features for this bot. Might not be implemented\n /tokens shows current token in the watchlist.'
 
-    context.bot.send_message(chat_id=update.effective_chat.id,text=message)
+def buttonShow(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    partition = query.data.partition("show:")
+    coin = partition[2]
+    query.edit_message_text(text=f"Showing: {coin}")
+    print_cg_data(update,context,coin)
+
 #Telegram api and wrapper logic
 bot = Bot(token=token)
-dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0)
+dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0, persistence=watchlist_persistence, use_context=True)
 
-
-add_token_handler = CommandHandler('add',addToken)
-dispatcher.add_handler(add_token_handler)
-
-show_token_handler = CommandHandler('show',show)
-dispatcher.add_handler(show_token_handler)
-
-# exc_handler = CommandHandler('exc',exc)
-# dispatcher.add_handler(exc_handler)
-
-tokens_handler = CommandHandler('tokens',tokens)
-dispatcher.add_handler(tokens_handler)
-
-suggest_handler = CommandHandler('suggest',suggest)
-dispatcher.add_handler(suggest_handler)
-
-help_handler = CommandHandler('help',shelp)
-dispatcher.add_handler(help_handler)
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("clear", clear))
+dispatcher.add_handler(CommandHandler('add', addToken))
+dispatcher.add_handler(CommandHandler('tokens', tokens))
+dispatcher.add_handler(CommandHandler('show', show))
+dispatcher.add_handler(CallbackQueryHandler(buttonShow,pattern='show:'))
+dispatcher.add_handler(CallbackQueryHandler(buttonAdd,pattern='.*desc:.*'))
 
 @app.route("/", methods=["POST"])
 def index() -> Response:
